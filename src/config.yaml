@@ -1,0 +1,420 @@
+# =============================================================================
+# Pipeline configuration
+#
+# This file is the single source of truth for the pipeline. Every constant that
+# governs cleaning, feature engineering, splitting, modelling, tuning and output
+# was carried over verbatim from the decisions made and validated in eda.ipynb.
+# Comments trace each block back to the relevant EDA section so a reviewer can
+# check this file against the notebook directly.
+# =============================================================================
+
+random_state: 42
+
+data:
+  db_path: "data/hotel.db"           # raw SQLite export (see EDA Section 1)
+  table: "bookings"                  # the only table used for modelling — `reviews` is
+                                      # never joined into df_model anywhere in the EDA
+  output_dir: "outputs"
+  models_dir: "outputs/models"
+
+# -----------------------------------------------------------------------------
+# Targets (EDA Section 9 / Section 13)
+# -----------------------------------------------------------------------------
+target:
+  task1: "outcome"       # 3-class: CHECK-OUT / CANCELED / NO-SHOW
+  task2: "adr_clean"     # regression: reference nightly price, real (non-zero) rows only
+
+# -----------------------------------------------------------------------------
+# Feature lists (EDA Section 15 — feats_t1 / feats_t2 / LEAKAGE_COLS)
+# -----------------------------------------------------------------------------
+features:
+  categorical:
+    - hotel_clean
+    - meal_clean
+    - market_segment_clean
+    - distribution_channel_clean
+    - deposit_type_clean
+    - customer_type_clean
+    - month_clean
+    - reserved_room_type_clean
+    - promo_code_clean
+    - country_clean
+
+  numeric_base:
+    - lead_time_clean
+    - arrival_date_year
+    - arrival_date_day_of_month
+    - month_num
+    - stays_in_weekend_nights
+    - stays_in_week_nights
+    - adults
+    - children
+    - babies
+    - is_repeated_guest
+    - previous_cancellations
+    - previous_bookings_not_canceled
+    - booking_changes
+    - days_in_waiting_list
+    - required_car_parking_spaces
+    - total_of_special_requests
+    - has_agent
+    - has_company
+
+  # adr_clean is a legitimate booking-time-known feature for Task 1 (classification) —
+  # it is the Task 2 *target*, so it is never added to Task 2's feature list.
+  task1_extra_numeric:
+    - adr_clean
+
+  # Added by EngineeredFeatureAdder (EDA Section 14). Listed here for documentation /
+  # config-driven visibility only — the derivation logic itself lives in data_preparation.py.
+  engineered_numeric:
+    - is_domestic
+    - prior_cancellation_flag
+    - total_guests
+    - has_children
+    - total_nights
+    - commitment_signal
+    - high_risk_combo
+    - lead_time_log
+    - month_sin
+    - month_cos
+    - year_trend
+
+  # Never used as a model feature for either task — either they leak the outcome directly,
+  # are only known after booking-time, or are alternate/derived forms of the targets
+  # themselves (EDA Section 15's leakage assertion).
+  leakage_cols:
+    - assigned_room_type_clean
+    - room_type_mismatch
+    - reservation_status_clean
+    - reservation_status
+    - reservation_status_date
+    - outcome
+    - canceled_flag
+    - noshow_flag
+    - checkout_flag
+    - adr_log
+    - is_zero_adr
+    - is_complementary
+
+# -----------------------------------------------------------------------------
+# Row-level structural cleaning (EDA Section 2 / clean_bookings() in Section 13.1)
+# -----------------------------------------------------------------------------
+cleaning:
+  missing_value_spellings: ["", "-", "NA", "N/A", "NAN", "NULL", "UNKNOWN"]
+
+  # Per-column canonical marker that "missing" gets consolidated to, matching each
+  # column's own documented convention rather than one blanket value everywhere.
+  missing_value_canonical:
+    market_segment_clean: "UNDEFINED"
+    distribution_channel_clean: "UNDEFINED"
+    meal_clean: "UNDEFINED"
+    customer_type_clean: "UNKNOWN"
+    country_clean: "OTH"
+    promo_code_clean: "NONE"
+
+  category_typo_fix:
+    deposit_type_clean:
+      "NO-DEPOSIT": "NO DEPOSIT"
+      "NON-REFUND": "NON REFUND"
+      "NO DEPOST": "NO DEPOSIT"
+    customer_type_clean:
+      "TRANSIANT": "TRANSIENT"
+    market_segment_clean:
+      "OFFLINE-TA/TO": "OFFLINE TA/TO"
+      "ONLINE-TA": "ONLINE TA"
+      "OFFLINE TA/T0": "OFFLINE TA/TO"
+      "ONLIN TA": "ONLINE TA"
+
+  country_iso_map:
+    SINGAPORE: SGP
+    AUSTRALIA: AUS
+    CHINA: CHN
+    HONG KONG: HKG
+    INDIA: IND
+    INDONESIA: IDN
+    JAPAN: JPN
+    MALAYSIA: MYS
+    MYANMAR: MMR
+    NEW ZEALAND: NZL
+    PHILIPPINES: PHL
+    SOUTH KOREA: KOR
+    TAIWAN: TWN
+    THAILAND: THA
+    UNITED KINGDOM: GBR
+    UNITED STATES: USA
+    VIETNAM: VNM
+    OTHER: OTH
+
+  month_map:
+    JAN: JAN
+    JANUARY: JAN
+    FEB: FEB
+    FEBRUARY: FEB
+    MAR: MAR
+    MARCH: MAR
+    APR: APR
+    APRIL: APR
+    MAY: MAY
+    JUN: JUN
+    JUNE: JUN
+    JUL: JUL
+    JULY: JUL
+    AUG: AUG
+    AUGUST: AUG
+    SEP: SEP
+    SEPTEMBER: SEP
+    OCT: OCT
+    OCTOBER: OCT
+    NOV: NOV
+    NOVEMBER: NOV
+    DEC: DEC
+    DECEMBER: DEC
+
+  month_num_map:
+    JAN: 1
+    FEB: 2
+    MAR: 3
+    APR: 4
+    MAY: 5
+    JUN: 6
+    JUL: 7
+    AUG: 8
+    SEP: 9
+    OCT: 10
+    NOV: 11
+    DEC: 12
+
+# -----------------------------------------------------------------------------
+# Preprocessing pipeline (EDA Section 16)
+# -----------------------------------------------------------------------------
+preprocessing:
+  numeric_impute_strategy: "median"
+  categorical_impute_strategy: "most_frequent"
+
+  # IQRCapper: clip to [Q1 - k*IQR, Q3 + k*IQR], learned on training data only.
+  # k=3.0 (wider than the conventional 1.5) is deliberate — EDA Section 8 found these
+  # "outliers" carry real signal, so only the most extreme leverage points are capped.
+  outlier_cap:
+    k: 3.0
+    columns:
+      - lead_time_clean
+      - total_of_special_requests
+      - booking_changes
+      - days_in_waiting_list
+      - previous_cancellations
+      - previous_bookings_not_canceled
+
+  # MissingnessIndicatorAdder: only lead_time_clean carries genuine post-cleaning
+  # missingness (EDA Section 13.2) — every categorical column's "missing" was already
+  # consolidated into an explicit category above, not left as NaN.
+  missingness_indicator_columns:
+    - lead_time_clean
+
+# -----------------------------------------------------------------------------
+# Train / validation / test split (EDA Section 15)
+# -----------------------------------------------------------------------------
+split:
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  task1_stratify: true    # stratify on the outcome target — NO-SHOW is ~1% of rows
+  task2_stratify: false
+
+# Task 2 only: exclude adr_clean == 0 bookings before splitting (EDA Section 10.5's
+# tested decision — zero-ADR bookings are a structurally different population, almost
+# entirely COMPLEMENTARY-segment, and including them measurably hurt validation R²).
+task2:
+  exclude_zero_adr: true
+
+# -----------------------------------------------------------------------------
+# Baseline model registries (EDA Section 17 / Section 27 — registry_t1 / registry_t2)
+#
+# Task 1's roster is 6 models, not 8: Ridge and Lasso (L1-Logistic) are excluded from
+# BASELINE FITTING entirely, not just tuning (EDA Section 27) — both are the same linear
+# decision boundary as plain Logistic Regression with a different penalty, so they add
+# no information Logistic doesn't already cover, and RidgeClassifier additionally can't
+# be scored on PR-AUC (Task 1's ranking metric) without a separate probability
+# calibrator. Task 2 keeps its full 8-model roster — Ridge/Lasso are genuinely distinct
+# there (different regularisation penalty on a continuous target, no probability-output
+# caveat).
+#
+# Both tasks' "Gradient Boosting" uses HistGradientBoosting, not the classic
+# GradientBoosting implementation (EDA Section 27) — a histogram-based split-finding
+# algorithm that is dramatically faster at this dataset's size with equivalent-quality
+# results, adopted after confirming Gradient Boosting was never competitive with Random
+# Forest on either task's ranking metric in the first place, so a faster-but-equivalent
+# implementation carries no ranking risk. HistGradientBoostingClassifier natively
+# supports class_weight="balanced" (unlike classic GradientBoostingClassifier), so the
+# old sample_weight-at-fit-time workaround is no longer needed for Task 1.
+# -----------------------------------------------------------------------------
+models:
+  task1:
+    "Naive (Most-Frequent)":
+      class: "sklearn.dummy.DummyClassifier"
+      params: {strategy: "most_frequent"}
+    "Logistic":
+      class: "sklearn.linear_model.LogisticRegression"
+      params: {max_iter: 2000, class_weight: "balanced"}
+    "Decision Tree":
+      class: "sklearn.tree.DecisionTreeClassifier"
+      params: {class_weight: "balanced", random_state: 42}
+    "Random Forest":
+      class: "sklearn.ensemble.RandomForestClassifier"
+      params: {class_weight: "balanced", random_state: 42, n_jobs: -1}
+    "Gradient Boosting":
+      class: "sklearn.ensemble.HistGradientBoostingClassifier"
+      params: {random_state: 42, class_weight: "balanced"}
+    "KNN":
+      class: "sklearn.neighbors.KNeighborsClassifier"
+      params: {}
+      # No imbalance handling available for KNN — documented limitation (EDA Section 17).
+
+  task2:
+    "Naive (Mean)":
+      class: "sklearn.dummy.DummyRegressor"
+      params: {strategy: "mean"}
+    "Linear":
+      class: "sklearn.linear_model.LinearRegression"
+      params: {}
+    "Ridge":
+      class: "sklearn.linear_model.Ridge"
+      params: {random_state: 42}
+    "Lasso":
+      class: "sklearn.linear_model.Lasso"
+      params: {random_state: 42, max_iter: 5000}
+    "Decision Tree":
+      class: "sklearn.tree.DecisionTreeRegressor"
+      params: {random_state: 42}
+    "Random Forest":
+      class: "sklearn.ensemble.RandomForestRegressor"
+      params: {random_state: 42, n_jobs: -1}
+    "Gradient Boosting":
+      class: "sklearn.ensemble.HistGradientBoostingRegressor"
+      params: {random_state: 42}
+    "KNN":
+      class: "sklearn.neighbors.KNeighborsRegressor"
+      params: {}
+
+# -----------------------------------------------------------------------------
+# Hyperparameter tuning (EDA Section 22, as redesigned; Section 27's runtime refinements)
+#
+# search_method is chosen per model empirically (measured single-fit/search runtime),
+# not by "linear vs. tree" — see README for the full rationale. Deliberate departures
+# from a naive "tune everything the same way" approach:
+#   - Task 1 excludes Ridge and Lasso from tuning (and, since Section 27, from baseline
+#     fitting too — see the `models` block above) — Task 1's tuned roster is Logistic,
+#     Decision Tree, KNN, Random Forest, Gradient Boosting.
+#   - KNN uses 'halving' in BOTH tasks, not 'grid' — its cost is dominated by
+#     prediction against the full training set during CV scoring, which
+#     HalvingRandomSearchCV's resource='n_samples' directly cuts (measured ~192s -> ~6s
+#     for Task 1, ~176s -> ~3s for Task 2).
+#   - "Gradient Boosting" here tunes HistGradientBoosting's hyperparameters (Section 27)
+#     — `max_iter` (boosting rounds) takes the place of classic GradientBoosting's
+#     `n_estimators`; `learning_rate` and `max_depth` carry over unchanged, at the same
+#     search ranges as before, since they mean the same thing in both implementations.
+#
+# param_grid entries are either a literal list (used as-is by both search types) or a
+# {type: randint|uniform, low, high} spec (used only by 'halving' models with a
+# continuous/wide space) — parsed into a scipy.stats distribution at runtime by
+# model_training.py. randint(low, high) is high-exclusive, matching scipy directly;
+# uniform's [low, high] here is the actual sampled interval (converted internally to
+# scipy's loc/scale form as loc=low, scale=high-low).
+#
+# tune_models() in model_training.py runs every search with n_jobs=-1 (Section 27),
+# except for a model whose own baseline params already set n_jobs (Random Forest) —
+# there, the search stays at n_jobs=1 to avoid nested parallelism fighting itself for
+# the same cores.
+# -----------------------------------------------------------------------------
+tuning:
+  cv: 3
+
+  task1:
+    scoring: "f1_macro"   # predict-based — works uniformly across every model actually tuned
+    models:
+      "Logistic":
+        search_method: "grid"
+        param_grid:
+          C: [0.01, 0.1, 1, 10]
+      "Decision Tree":
+        search_method: "grid"
+        param_grid:
+          max_depth: [5, 10, 20, null]
+          min_samples_leaf: [1, 5, 20]
+      "KNN":
+        search_method: "halving"
+        param_grid:
+          n_neighbors: [5, 15, 30, 50]
+          weights: ["uniform", "distance"]
+      "Random Forest":
+        search_method: "halving"
+        n_candidates: 15
+        param_grid:
+          n_estimators: {type: "randint", low: 80, high: 250}
+          max_depth: [null, 10, 20, 30]
+          min_samples_leaf: {type: "randint", low: 1, high: 10}
+      "Gradient Boosting":
+        search_method: "halving"
+        n_candidates: 12
+        param_grid:
+          max_iter: {type: "randint", low: 50, high: 150}
+          learning_rate: {type: "uniform", low: 0.03, high: 0.28}
+          max_depth: {type: "randint", low: 2, high: 4}
+
+  task2:
+    scoring: "r2"    # matches Task 2's own ranking metric directly
+    models:
+      "Ridge":
+        search_method: "grid"
+        param_grid:
+          alpha: [0.1, 1, 10, 100]
+      "Lasso":
+        search_method: "grid"
+        param_grid:
+          alpha: [0.01, 0.1, 1, 10]
+      "Decision Tree":
+        search_method: "grid"
+        param_grid:
+          max_depth: [5, 10, 20, null]
+          min_samples_leaf: [1, 5, 20]
+      "KNN":
+        search_method: "halving"
+        param_grid:
+          n_neighbors: [5, 15, 30, 50]
+          weights: ["uniform", "distance"]
+      "Random Forest":
+        search_method: "halving"
+        n_candidates: 15
+        param_grid:
+          n_estimators: {type: "randint", low: 80, high: 250}
+          max_depth: [null, 10, 20, 30]
+          min_samples_leaf: {type: "randint", low: 1, high: 10}
+      "Gradient Boosting":
+        search_method: "halving"
+        n_candidates: 12
+        param_grid:
+          max_iter: {type: "randint", low: 50, high: 150}
+          learning_rate: {type: "uniform", low: 0.03, high: 0.28}
+          max_depth: {type: "randint", low: 2, high: 4}
+
+# -----------------------------------------------------------------------------
+# Evaluation metrics (EDA Section 18)
+# -----------------------------------------------------------------------------
+evaluation:
+  task1:
+    metrics: ["accuracy", "precision_macro", "recall_macro", "f1_macro", "roc_auc_macro", "pr_auc_macro"]
+    ranking_metric: "pr_auc_macro"   # far more sensitive than ROC-AUC/accuracy to the rare NO-SHOW class
+  task2:
+    metrics: ["MAE", "MSE", "RMSE", "R2"]
+    ranking_metric: "R2"
+
+# -----------------------------------------------------------------------------
+# Output artefact filenames, written under data.output_dir / data.models_dir
+# -----------------------------------------------------------------------------
+output:
+  baseline_results: "task{task}_baseline_results.csv"
+  tuned_results: "task{task}_tuned_results.csv"
+  tuned_best_params: "task{task}_tuned_best_params.csv"
+  closing_summary: "closing_summary_baseline_tuned_test.csv"
+  manifest: "manifest.json"
+  final_model: "final_model_task{task}.pkl"
